@@ -1,0 +1,16 @@
+﻿name: shared-ci-cd
+on:
+  push: { branches: [ "main" ] }
+  pull_request: { branches: [ "main" ] }
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  pipeline:
+    uses: UNIANDES-202515-PROYECTO-II-G17-BACKEND/.github/.github/workflows/ms-ci-cd.yml@main
+    with:
+      env: "dev"
+      python_version: "3.13"
+    secrets: inherit
