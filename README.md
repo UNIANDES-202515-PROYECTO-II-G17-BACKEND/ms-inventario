@@ -1,4 +1,4 @@
-﻿# ms-api-gateway
+﻿# ms-inventario
 
 Microservicio FastAPI en Python 3.13 con despliegue en Cloud Run (GCP).
 

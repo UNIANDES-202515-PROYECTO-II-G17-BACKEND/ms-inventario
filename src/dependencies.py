@@ -8,10 +8,9 @@ from google.cloud import pubsub_v1, bigquery, bigtable, storage
 
 from config import settings
 
-# Global clients/engines
 redis_client = None
-db_engines: Dict[str, AsyncEngine] = {}        # country_code -> engine
-db_sessions: Dict[str, async_sessionmaker] = {}# country_code -> sessionmaker
+db_engines: Dict[str, AsyncEngine] = {}
+db_sessions: Dict[str, async_sessionmaker] = {}
 pub_client: Optional[pubsub_v1.PublisherClient] = None
 bq_client: Optional[bigquery.Client] = None
 bt_client: Optional[bigtable.Client] = None
@@ -113,9 +112,7 @@ async def lifespan(app):
     try:
         yield
     finally:
-        # Cierre ordenado
         if redis_client:
             await redis_client.close()
         for eng in db_engines.values():
             await eng.dispose()
-        # Pub/Sub / BigQuery / Bigtable / GCS usan conexiones administradas por cliente
