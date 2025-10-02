@@ -3,7 +3,11 @@ name = "ms-api-gateway"
 version = "0.1.0"
 description = "Microservicio FastAPI en Python 3.13 para Cloud Run"
 authors = ["G17 <team@example.com>"]
-package-mode = false
+package-mode = true
+
+packages = [
+  { include = "src", from = "." }
+]
 
 [tool.poetry.dependencies]
 python = "^3.13"
