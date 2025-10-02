@@ -7,10 +7,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  id-token: write
-
 jobs:
   pipeline:
     uses: UNIANDES-202515-PROYECTO-II-G17-BACKEND/.github/.github/workflows/python-service.yml@main

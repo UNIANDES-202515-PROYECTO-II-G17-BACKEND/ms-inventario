@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     GCS_BUCKET: str | None = None
     GCS_FOLDER: str | None = None
 
+
+
     class Config:
         env_file = ".env"
 
