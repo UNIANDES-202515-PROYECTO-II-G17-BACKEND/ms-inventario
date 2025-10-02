@@ -1,18 +1,21 @@
-﻿# ms-inventario
+﻿## Microservicio FastAPI en Python 3.13 con despliegue en Cloud Run (GCP).
 
-Microservicio FastAPI en Python 3.13 con despliegue en Cloud Run (GCP).
+# Requisitos
+
+* Python 3.13
+* poetry 1.8.3
 
 ## Desarrollo
-`ash
-poetry install
-cp .env.example .env
-poetry run uvicorn app:app --reload --port 8080
-`
+```bash
+    pip install poetry==1.8.3
+    poetry install
+    poetry run uvicorn src.app:app --reload --port 8080
+```
 
 ## Tests
-`ash
-poetry run pytest -q
-`
+```bash
+    poetry run pytest -q
+```
 
 Endpoints:
 - GET /health
