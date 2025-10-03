@@ -17,4 +17,3 @@ jobs:
     with:
       service_name: ${{ github.event.repository.name }}
     secrets: inherit
-
