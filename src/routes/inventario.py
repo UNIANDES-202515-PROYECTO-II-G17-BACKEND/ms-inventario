@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from src.domain.schemas import (
     ProductoDetalleOut, UbicacionStockOut
 )
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/inventario", tags=["Inventario"])
 
 # ---------- PRODUCTO ----------
