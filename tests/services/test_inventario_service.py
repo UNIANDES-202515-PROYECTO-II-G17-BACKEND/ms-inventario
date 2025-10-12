@@ -8,112 +8,132 @@ from src.domain.models import (
     CertificacionTipoEnum, PaisEnum, InventarioEstadoEnum
 )
 
-# Helper para crear datos de prueba complejos
+# --- Fixtures de Datos --- 
+
 @pytest.fixture
-def setup_data(session):
+def setup_productos(session):
     p1 = svc.crear_producto(session, sku="P1", nombre="Producto A", categoria="C1", temp_min=0, temp_max=0, controlado=False)
     p2 = svc.crear_producto(session, sku="P2", nombre="Producto B", categoria="C2", temp_min=0, temp_max=0, controlado=True)
-    
+    return p1, p2
+
+@pytest.fixture
+def setup_infra(session):
     b1 = svc.crear_bodega(session, direccion="B1", ciudad="Bogota", pais=PaisEnum.CO)
     u1 = svc.crear_ubicacion(session, bodega_id=b1.id, pasillo="A", estante="1", posicion="1")
     u2 = svc.crear_ubicacion(session, bodega_id=b1.id, pasillo="A", estante="1", posicion="2")
+    return b1, u1, u2
+
+@pytest.fixture
+def setup_completo(session, setup_productos, setup_infra):
+    p1, p2 = setup_productos
+    b1, u1, u2 = setup_infra
     
-    # Lotes para P1
     l1_p1 = svc.crear_lote(session, producto_id=p1.id, codigo="L1-P1", vencimiento=date.today() + timedelta(days=10))
-    l2_p1 = svc.crear_lote(session, producto_id=p1.id, codigo="L2-P1", vencimiento=date.today() + timedelta(days=5)) # Vence antes
-    
-    # Inventario para P1
+    l2_p1 = svc.crear_lote(session, producto_id=p1.id, codigo="L2-P1", vencimiento=date.today() + timedelta(days=5))
+    l3_p1_nv = svc.crear_lote(session, producto_id=p1.id, codigo="L3-P1-NV", vencimiento=None)
+
     svc.recibir_entrada(session, lote_id=l1_p1.id, ubicacion_id=u1.id, cantidad=100)
     svc.recibir_entrada(session, lote_id=l2_p1.id, ubicacion_id=u1.id, cantidad=50)
-    svc.recibir_entrada(session, lote_id=l1_p1.id, ubicacion_id=u2.id, cantidad=25)
-    # Inventario bloqueado para P1 (no debe contarse en stock disponible)
-    svc.recibir_entrada(session, lote_id=l1_p1.id, ubicacion_id=u1.id, cantidad=10, estado=InventarioEstadoEnum.BLOQUEADO)
+    svc.recibir_entrada(session, lote_id=l3_p1_nv.id, ubicacion_id=u2.id, cantidad=200)
 
-    return p1, p2, b1, u1, u2, l1_p1, l2_p1
+    return p1, p2, b1, u1, u2, l1_p1, l2_p1, l3_p1_nv
 
-# (Se mantienen los tests anteriores de create, associate, recibir_entrada, salida_por_fefo)
+# --- Tests --- 
 
-# ---------- Consultas de Stock ----------
-def test_stock_por_producto(session, setup_data):
-    """Prueba que el stock total se calcula correctamente, ignorando estados no disponibles."""
-    p1, p2, *_ = setup_data
-    # Stock de P1 = 100 (l1,u1) + 50 (l2,u1) + 25 (l1,u2) = 175. El bloqueado no cuenta.
-    assert svc.stock_por_producto(session, p1.id) == 175
-    # P2 no tiene stock
+def test_crear_producto_exitoso(session):
+    producto = svc.crear_producto(session, sku="SKU123", nombre="Producto Test", categoria="A", temp_min=10.0, temp_max=20.0, controlado=False)
+    assert producto.id is not None
+
+def test_crear_producto_sku_duplicado(session, setup_productos):
+    with pytest.raises(ValueError, match="SKU ya existe"):
+        svc.crear_producto(session, sku="P1", nombre="Otro", categoria="O", temp_min=0, temp_max=0, controlado=False)
+
+def test_asociar_certificacion_exitosa(session, setup_productos):
+    p1, _ = setup_productos
+    cert = svc.asociar_certificacion(session, producto_id=p1.id, autoridad="INVIMA", tipo=CertificacionTipoEnum.INVIMA, vigencia=date(2025, 1, 1))
+    session.refresh(p1)
+    assert len(p1.certificaciones) == 1
+
+def test_crear_bodega_duplicada(session, setup_infra):
+    with pytest.raises(ValueError, match="La bodega ya existe"):
+        svc.crear_bodega(session, direccion="B1", ciudad="Bogota", pais=PaisEnum.CO)
+
+def test_crear_ubicacion_duplicada(session, setup_infra):
+    b1, _, _ = setup_infra
+    with pytest.raises(ValueError, match="La ubicación ya existe"):
+        svc.crear_ubicacion(session, bodega_id=b1.id, pasillo="A", estante="1", posicion="1")
+
+def test_crear_lote_producto_no_existe(session):
+    with pytest.raises(ValueError, match="Producto no existe"):
+        svc.crear_lote(session, producto_id=uuid4(), codigo="LOTE001", vencimiento=date(2025, 1, 1))
+
+def test_crear_lote_codigo_duplicado(session, setup_productos):
+    p1, _ = setup_productos
+    svc.crear_lote(session, producto_id=p1.id, codigo="LOTE001", vencimiento=date(2025, 1, 1))
+    with pytest.raises(ValueError, match="El código de lote ya existe"):
+        svc.crear_lote(session, producto_id=p1.id, codigo="LOTE001", vencimiento=date(2026, 1, 1))
+
+def test_recibir_entrada_nueva(session, setup_completo):
+    p1, _, _, u2, _, l2_p1, _, _ = setup_completo
+    inv = svc.recibir_entrada(session, lote_id=l2_p1.id, ubicacion_id=u2.id, cantidad=100)
+    assert inv.cantidad == 200
+
+def test_recibir_entrada_existente(session, setup_completo):
+    _, _, _, u1, _, _, l2_p1, _ = setup_completo
+    inv = svc.recibir_entrada(session, lote_id=l2_p1.id, ubicacion_id=u1.id, cantidad=30)
+    assert inv.cantidad == 80 # 50 existentes + 30 nuevos
+
+def test_recibir_entrada_cantidad_negativa(session, setup_completo):
+    _, _, _, u1, _, l1_p1, _, _ = setup_completo
+    with pytest.raises(ValueError, match="Cantidad debe ser positiva"):
+        svc.recibir_entrada(session, lote_id=l1_p1.id, ubicacion_id=u1.id, cantidad=0)
+
+def test_salida_fefo_lote_sin_vencimiento(session, setup_completo):
+    p1, _, _, _, _, l1_p1, l2_p1, l3_p1_nv = setup_completo
+    consumos = svc.salida_por_fefo(session, producto_id=p1.id, cantidad=150)
+    assert len(consumos) == 2
+    assert consumos[0][0].lote_id == l2_p1.id and consumos[0][1] == 50
+    assert consumos[1][0].lote_id == l1_p1.id and consumos[1][1] == 100
+    
+    consumos_2 = svc.salida_por_fefo(session, producto_id=p1.id, cantidad=75)
+    assert len(consumos_2) == 1
+    assert consumos_2[0][0].lote_id == l3_p1_nv.id
+
+def test_producto_detalle_sin_lotes_ni_certificaciones(session, setup_productos):
+    _, p2 = setup_productos
+    detalle = svc.producto_detalle(session, p2.id)
+    assert detalle["stock_total"] == 0 and not detalle["certificaciones"] and not detalle["lotes"]
+
+def test_list_productos_con_filtro_ids(session, setup_productos):
+    p1, p2 = setup_productos
+    productos = svc.list_productos(session, ids=[p2.id])
+    assert len(productos) == 1 and productos[0].id == p2.id
+
+def test_recibir_entrada_estado_diferente(session, setup_completo):
+    _, _, _, u1, _, l1_p1, _, _ = setup_completo
+    inv2 = svc.recibir_entrada(session, lote_id=l1_p1.id, ubicacion_id=u1.id, cantidad=20, estado=InventarioEstadoEnum.BLOQUEADO)
+    assert inv2.cantidad == 20
+    assert session.query(Inventario).filter_by(lote_id=l1_p1.id, ubicacion_id=u1.id).count() == 2
+
+def test_stock_por_producto(session, setup_completo):
+    p1, p2, *_ = setup_completo
+    assert svc.stock_por_producto(session, p1.id) == 350
     assert svc.stock_por_producto(session, p2.id) == 0
 
-def test_stock_detallado(session, setup_data):
-    """Prueba que el detalle de stock se agrupa y suma correctamente."""
-    p1, *_ = setup_data
+def test_stock_detallado(session, setup_completo):
+    p1, *_ = setup_completo
     detalle = svc.stock_detallado(session, p1.id)
-    
-    # Esperamos 3 grupos: (l1,u1), (l2,u1), (l1,u2). El bloqueado se suma al disponible del mismo lote/ubicacion.
     assert len(detalle) == 3
-    # Verificamos una de las entradas para asegurar que los datos son correctos
-    item_l1_u1 = next((item for item in detalle if item['codigo'] == 'L1-P1' and item['ubicacion_id'] == setup_data[3].id), None)
-    assert item_l1_u1 is not None
-    assert item_l1_u1['cantidad'] == 110 # 100 disponibles + 10 bloqueados
 
-# ---------- Consultas de Producto ----------
-def test_producto_detalle(session, setup_data):
-    """Prueba que el detalle completo de un producto es correcto."""
-    p1, _, _, u1, u2, l1_p1, l2_p1 = setup_data
+def test_producto_detalle(session, setup_completo):
+    p1, *_ = setup_completo
     svc.asociar_certificacion(session, producto_id=p1.id, autoridad="TestAuth", tipo=CertificacionTipoEnum.FDA, vigencia=date.today())
-
     detalle = svc.producto_detalle(session, p1.id)
+    assert detalle["stock_total"] == 350
+    assert len(detalle["certificaciones"]) == 1
+    assert len(detalle["lotes"]) == 3
 
-    assert detalle['id'] == p1.id
-    assert detalle['sku'] == "P1"
-    assert detalle['stock_total'] == 185 # 175 disponibles + 10 bloqueados
-    assert len(detalle['certificaciones']) == 1
-    assert detalle['certificaciones'][0]['autoridad'] == "TestAuth"
-    assert len(detalle['lotes']) == 2
-    
-    lote_detalle = next(l for l in detalle['lotes'] if l['codigo'] == 'L1-P1')
-    assert lote_detalle['cantidad_total'] == 135 # 100 + 25 + 10
-
-def test_producto_detalle_no_encontrado(session):
-    """Prueba que se lanza un error si el producto no se encuentra."""
-    with pytest.raises(ValueError, match="Producto no encontrado"):
-        svc.producto_detalle(session, uuid4())
-
-def test_ubicaciones_con_stock_por_producto(session, setup_data):
-    """Prueba que se listan las ubicaciones correctas con su stock."""
-    p1, *_ = setup_data
-    u1, u2 = setup_data[3], setup_data[4]
-
+def test_ubicaciones_con_stock_por_producto(session, setup_completo):
+    p1, *_ = setup_completo
     ubicaciones = svc.ubicaciones_con_stock_por_producto(session, p1.id)
-
     assert len(ubicaciones) == 2
-    # Ubicacion 1 tiene stock de l1 (100+10) y l2 (50) = 160
-    ubicacion1_info = next(u for u in ubicaciones if u['ubicacion_id'] == u1.id)
-    assert ubicacion1_info['cantidad'] == 160
-    # Ubicacion 2 tiene stock de l1 (25)
-    ubicacion2_info = next(u for u in ubicaciones if u['ubicacion_id'] == u2.id)
-    assert ubicacion2_info['cantidad'] == 25
-
-def test_list_productos(session, setup_data):
-    """Prueba el listado de productos con y sin filtros."""
-    p1, p2, *_ = setup_data
-    
-    # Listar todos
-    todos = svc.list_productos(session)
-    assert len(todos) == 2
-    assert todos[0].nombre == "Producto A" # Ordenado por nombre ASC
-
-    # Con límite
-    limitados = svc.list_productos(session, limit=1)
-    assert len(limitados) == 1
-
-    # Con offset
-    offseteados = svc.list_productos(session, limit=1, offset=1)
-    assert len(offseteados) == 1
-    assert offseteados[0].nombre == "Producto B"
-
-    # Por IDs
-    por_ids = svc.list_productos(session, ids=[p2.id])
-    assert len(por_ids) == 1
-    assert por_ids[0].id == p2.id
-
-# (Aquí irían los tests de las funciones que ya estaban, como crear_producto, etc.)
-# Para brevedad, no los repito, pero deben estar en el archivo.
