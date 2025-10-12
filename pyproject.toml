@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "ms-api-gateway"
+name = "ms-inventario"
 version = "0.1.0"
 description = "Microservicio FastAPI en Python 3.13 para Cloud Run"
 authors = ["G17 <team@example.com>"]
@@ -22,6 +22,7 @@ google-cloud-pubsub = ">=2.21"
 google-cloud-bigquery = ">=3.25"
 google-cloud-bigtable = ">=2.24"
 google-cloud-storage = ">=2.18"
+psycopg2-binary = "^2.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.2"
