@@ -1,13 +1,17 @@
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from sqlalchemy.orm import Session
 from uuid import UUID
+import json
 from src.dependencies import get_session
 from src.services import inventario_service as svc
+from src.config import settings
+from src.infrastructure.infrastructure import get_redis
 from src.domain.schemas import (
     ProductoCreate, ProductoOut, CertificacionCreate, CertificacionOut,
     BodegaCreate, BodegaOut, UbicacionCreate, UbicacionOut,
-    LoteCreate, LoteOut, EntradaCreate, FEFOOut, InventarioOut, StockDetalladoItem
+    LoteCreate, LoteOut, EntradaCreate, FEFOOut, InventarioOut, StockDetalladoItem,
+    ProductoDetalleOut, UbicacionStockOut
 )
 
 router = APIRouter(prefix="/v1/inventario", tags=["Inventario"])
@@ -98,3 +102,53 @@ def stock(producto_id: str, session: Session = Depends(get_session)):
 @router.get("/stock/{producto_id}/detalle", response_model=List[StockDetalladoItem])
 def stock_detalle(producto_id: str, session: Session = Depends(get_session)):
     return svc.stock_detallado(session, producto_id)
+
+@router.get("/producto/{producto_id}/detalle", response_model=ProductoDetalleOut)
+def producto_detalle(
+    producto_id: UUID,
+    session: Session = Depends(get_session),
+    country: str | None = Header(default=None, alias=settings.COUNTRY_HEADER),
+):
+    redis = get_redis()
+    country_key = (country or settings.DEFAULT_SCHEMA).strip().lower()
+    cache_key = f"{country_key}-{producto_id}"
+
+    # 1) Intento de caché seguro
+    if redis:
+        cached = redis.get(cache_key)
+        if cached:
+            try:
+                model = ProductoDetalleOut.model_validate_json(cached)
+                return model
+            except Exception as e:
+                # Cache corrupto: lo ignoramos y seguimos a DB
+                log.warning("Cache inválido para %s: %s", cache_key, e)
+
+    # 2) DB
+    try:
+        data_dict = svc.producto_detalle(session, producto_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    model = ProductoDetalleOut(**data_dict)
+
+    if redis:
+        try:
+            redis.set(cache_key, model.model_dump_json(), ex=300)
+        except Exception as e:
+            log.warning("No se pudo escribir en Redis %s: %s", cache_key, e)
+
+    return model
+
+@router.get("/producto/{producto_id}/ubicaciones", response_model=List[UbicacionStockOut])
+def ubicaciones_con_stock(producto_id: UUID,session: Session = Depends(get_session)):
+    return svc.ubicaciones_con_stock_por_producto(session, producto_id)
+
+
+@router.get("/productos/todos", response_model=List[ProductoOut])
+def productos_todos(
+    limit: Optional[int] = Query(default=None, ge=1, le=1000, description="Máximo de filas a devolver"),
+    offset: int = Query(default=0, ge=0, description="Desplazamiento para paginación"),
+    session: Session = Depends(get_session),
+):
+    return svc.list_productos(session, ids=None, limit=limit, offset=offset)

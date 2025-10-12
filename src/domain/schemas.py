@@ -98,3 +98,36 @@ class StockDetalladoItem(BaseModel):
     vencimiento: Optional[date]
     ubicacion_id: UUID
     cantidad: int
+
+
+class CertificacionBasic(BaseModel):
+    id: UUID
+    autoridad: str
+    tipo: str
+    vigencia: date
+
+class LoteResumen(BaseModel):
+    id: UUID
+    codigo: str
+    vencimiento: Optional[date]
+    cantidad_total: int
+
+class ProductoDetalleOut(BaseModel):
+    id: UUID
+    sku: str
+    nombre: str
+    categoria: Optional[str]
+    controlado: bool
+    stock_total: int
+    certificaciones: List[CertificacionBasic]
+    lotes: List[LoteResumen]
+
+# --- Ubicaciones con stock para un producto ---
+class UbicacionStockOut(BaseModel):
+    ubicacion_id: UUID
+    bodega_id: UUID
+    ciudad: str
+    pasillo: str
+    estante: str
+    posicion: str
+    cantidad: int

@@ -167,3 +167,114 @@ def stock_detallado(session: Session, producto_id: str):
          .order_by(Lote.vencimiento))
     rows = session.execute(q)
     return [dict(r._mapping) for r in rows.all()]
+
+
+
+def producto_detalle(session: Session, producto_id: UUID) -> dict:
+    """Devuelve dict con detalle del producto, certificaciones, stock total y lotes (cantidades)."""
+    prod = session.get(Producto, producto_id)
+    if not prod:
+        raise ValueError("Producto no encontrado")
+
+    # Certificaciones
+    certs = [
+        {
+            "id": c.id,
+            "autoridad": c.autoridad,
+            "tipo": c.tipo.value if hasattr(c.tipo, "value") else str(c.tipo),
+            "vigencia": c.vigencia,
+        }
+        for c in (prod.certificaciones or [])
+    ]
+
+    # Stock total
+    stock_total = session.scalar(
+        select(func.coalesce(func.sum(Inventario.cantidad), 0))
+        .join(Inventario.lote)
+        .where(Lote.producto_id == producto_id)
+    ) or 0
+
+    # Lotes con cantidad (orden por vencimiento ASC NULLS LAST)
+    lotes_rows = session.execute(
+        select(
+            Lote.id, Lote.codigo, Lote.vencimiento,
+            func.coalesce(func.sum(Inventario.cantidad), 0).label("cantidad_total")
+        )
+        .join(Inventario, Inventario.lote_id == Lote.id, isouter=True)
+        .where(Lote.producto_id == producto_id)
+        .group_by(Lote.id, Lote.codigo, Lote.vencimiento)
+        .order_by(Lote.vencimiento.asc().nulls_last())
+    ).all()
+
+    lotes = [
+        {
+            "id": r.id,
+            "codigo": r.codigo,
+            "vencimiento": r.vencimiento,
+            "cantidad_total": int(r.cantidad_total or 0),
+        }
+        for r in lotes_rows
+    ]
+
+    return {
+        "id": prod.id,
+        "sku": prod.sku,
+        "nombre": prod.nombre,
+        "categoria": prod.categoria,
+        "controlado": prod.controlado,
+        "stock_total": int(stock_total),
+        "certificaciones": certs,
+        "lotes": lotes,
+    }
+
+def ubicaciones_con_stock_por_producto(session: Session, producto_id: UUID) -> List[dict]:
+    """
+    Lista de ubicaciones con cantidad disponible (>0) para el producto.
+    Ordena ubicaciones por ciudad (A-Z), y luego pasillo/estante/posicion.
+    """
+    rows = session.execute(
+        select(
+            Ubicacion.id.label("ubicacion_id"),
+            Bodega.id.label("bodega_id"),
+            Bodega.ciudad,
+            Ubicacion.pasillo,
+            Ubicacion.estante,
+            Ubicacion.posicion,
+            func.sum(Inventario.cantidad).label("cantidad")
+        )
+        .join(Bodega, Bodega.id == Ubicacion.bodega_id)
+        .join(Inventario, Inventario.ubicacion_id == Ubicacion.id)
+        .join(Lote, Lote.id == Inventario.lote_id)
+        .where(Lote.producto_id == producto_id)
+        .group_by(Ubicacion.id, Bodega.id, Bodega.ciudad, Ubicacion.pasillo, Ubicacion.estante, Ubicacion.posicion)
+        .having(func.sum(Inventario.cantidad) > 0)
+        .order_by(Bodega.ciudad.asc(), Ubicacion.pasillo.asc(), Ubicacion.estante.asc(), Ubicacion.posicion.asc())
+    ).all()
+
+    return [
+        {
+            "ubicacion_id": r.ubicacion_id,
+            "bodega_id": r.bodega_id,
+            "ciudad": r.ciudad,
+            "pasillo": r.pasillo,
+            "estante": r.estante,
+            "posicion": r.posicion,
+            "cantidad": int(r.cantidad or 0)
+        }
+        for r in rows
+    ]
+
+def list_productos(
+    session: Session,
+    ids: Optional[List[UUID]] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[Producto]:
+    stmt = select(Producto).order_by(Producto.nombre.asc())
+    if ids:
+        stmt = stmt.where(Producto.id.in_(ids))
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit:
+        stmt = stmt.limit(limit)
+    return list(session.scalars(stmt))

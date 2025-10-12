@@ -14,8 +14,8 @@ class Settings:
     DB_PORT = int(os.getenv("DB_PORT", "5432"))
     DB_NAME = os.getenv("DB_NAME", "db_ms_inventario")
 
-    REDIS_HOST = os.getenv("REDIS_HOST", "")
-    REDIS_PORT = os.getenv("REDIS_PORT", "")
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 
     SQLALCHEMY_DATABASE_URI = (
     f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
