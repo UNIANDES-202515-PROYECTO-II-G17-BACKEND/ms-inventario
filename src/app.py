@@ -1,6 +1,7 @@
 ﻿from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 import logging, sys
 
@@ -32,7 +33,7 @@ async def lifespan(app):
         except Exception as e:
             log.error(f"❌ Error creando tablas en schema {schema}: {e}")
     yield
-    log.info("🛑 Finalizando aplicación ms-usuarios-autenticacion")
+    log.info("🛑 Finalizando aplicación ms-inventario")
 
 app = FastAPI(
     title=settings.SERVICE_NAME,
