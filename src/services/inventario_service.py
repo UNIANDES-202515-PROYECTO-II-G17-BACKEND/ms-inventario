@@ -7,6 +7,18 @@ from src.domain.models import (
     Producto, Lote, Inventario, Ubicacion, Bodega, CertificacionSanitaria,
     CertificacionTipoEnum, InventarioEstadoEnum
 )
+from typing import List, Dict, Any, Optional
+import csv
+import io
+import codecs
+from uuid import UUID
+from fastapi import HTTPException
+from src.domain.schemas import (ProductoCreate, AsociacionProveedor)
+import logging
+from src.config import settings
+from src.infrastructure.http import MsClient
+
+log = logging.getLogger(__name__)
 
 # ---------- Producto ----------
 def crear_producto(session: Session, *, sku: str, nombre: str,
@@ -278,3 +290,130 @@ def list_productos(
     if limit:
         stmt = stmt.limit(limit)
     return list(session.scalars(stmt))
+
+
+REQUIRED_HEADERS = {"sku", "nombre", "categoria", "temp_min", "temp_max", "controlado", "precio", "moneda", "lead_time_dias", "lote_minimo", "activo"}
+
+def _to_bool(v: str) -> bool:
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in {"true", "1", "si", "sí", "y", "yes", "t"}
+
+def _to_float(v: str) -> float:
+    if v is None or str(v).strip() == "":
+        return None
+    # admite coma decimal
+    s = str(v).strip().replace(",", ".")
+    return float(s)
+
+def _validate_headers(reader: csv.DictReader):
+    headers = {h.strip().lower() for h in (reader.fieldnames or [])}
+    missing = REQUIRED_HEADERS - headers
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Faltan columnas en el CSV: {', '.join(sorted(missing))}. "
+                   f"Cabeceras requeridas: {', '.join(sorted(REQUIRED_HEADERS))}"
+        )
+
+def _iter_dict_reader(stream: io.TextIOBase) -> csv.DictReader:
+    # Detecta delimitador ; o , automáticamente
+    sample = stream.read(4096)
+    stream.seek(0)
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(stream, dialect=dialect)
+    if reader.fieldnames:
+        reader.fieldnames = [h.strip().lower() for h in reader.fieldnames]
+    return reader
+
+def _row_to_payload(row: Dict[str, Any]) -> ProductoCreate:
+    try:
+        return ProductoCreate(
+            sku=str(row.get("sku", "")).strip(),
+            nombre=str(row.get("nombre", "")).strip(),
+            categoria=str(row.get("categoria", "")).strip(),
+            temp_min=_to_float(row.get("temp_min")),
+            temp_max=_to_float(row.get("temp_max")),
+            controlado=_to_bool(row.get("controlado")),
+        )
+    except Exception as e:
+        raise ValueError(f"Error convirtiendo tipos: {e}")
+
+def _row_to_payload_asociar_proveedor_producto(sku_proveedor: str, producto_id: UUID, row: Dict[str, Any]) -> AsociacionProveedor:
+    try:
+        return AsociacionProveedor(
+            producto_id=producto_id,
+            sku_proveedor=sku_proveedor,
+            precio=_to_float(row.get("precio", "")),
+            moneda=str(row.get("moneda", "")).strip(),
+            lead_time_dias=_to_float(row.get("lead_time_dias", "")),
+            lote_minimo=_to_float(row.get("lote_minimo", "")),
+            activo=_to_bool(row.get("activo")),
+        )
+    except Exception as e:
+        raise ValueError(f"Error convirtiendo tipos: {e}")
+
+
+
+def _process_rows(reader: csv.DictReader, session: Session, proveedor_uuid: UUID, x_country: str):
+    inserted = 0
+    errors: List[Dict[str, Any]] = []
+    client = MsClient(x_country)
+
+    for idx, row in enumerate(reader, start=2):
+        try:
+            payload = _row_to_payload(row)
+            if not payload.sku or not payload.nombre or not payload.categoria:
+                raise ValueError("sku, nombre y categoria son obligatorios")
+
+
+            newProduct = crear_producto(
+                session,
+                sku=payload.sku,
+                nombre=payload.nombre,
+                categoria=payload.categoria,
+                temp_min=payload.temp_min,
+                temp_max=payload.temp_max,
+                controlado=payload.controlado,
+            )
+
+            proveedor_id = proveedor_uuid
+            sku_proveedor = "SKU-AND-1234"
+            payloadAsociar = _row_to_payload_asociar_proveedor_producto(sku_proveedor,  newProduct.id, row)
+            #Enviamos la asociacion proveedor producto
+            payloadEnv = {
+                    "producto_id": str(payloadAsociar.producto_id),
+                    "sku_proveedor": sku_proveedor,
+                    "precio": payloadAsociar.precio,
+                    "moneda": payloadAsociar.moneda,
+                    "lead_time_dias": payloadAsociar.lead_time_dias,
+                    "lote_minimo": payloadAsociar.lote_minimo,
+                    "activo": payloadAsociar.activo,
+            }
+            try:
+                vincular = client.post(f"/v1/proveedores/{proveedor_id}/productos", json=payloadEnv)
+            except Exception as e:
+                log.info(f"Error creando relacion proveedor/producto: {e}")
+
+
+
+            inserted += 1
+
+        except ValueError as e:
+            errors.append({
+                "linea": idx,
+                "sku": (row.get("sku") or "").strip(),
+                "error": str(e)
+            })
+        except Exception as e:
+            errors.append({
+                "linea": idx,
+                "sku": (row.get("sku") or "").strip(),
+                "error": f"Excepción inesperada: {e}"
+            })
+
+    return inserted, errors

@@ -54,34 +54,16 @@ async def upload_csv_productos(
                 try:
                     # decodificación por streaming, soporta UTF-8 con BOM
                     text_stream = io.TextIOWrapper(file.file, encoding="utf-8-sig", newline="")
-                    reader = _iter_dict_reader(text_stream)
-                    _validate_headers(reader)
-                    inserted, errors = _process_rows(reader, session)
+                    reader = svc._iter_dict_reader(text_stream)
+                    svc._validate_headers(reader)
+                    inserted, errors = svc._process_rows(reader, session, UUID(request.headers.get("proveedor_id")), request.headers.get("X-Country"))
                 finally:
                     await file.close()
-
                 return {
                     "total": inserted + len(errors),
                     "insertados": inserted,
                     "errores": errors
                 }
-        # 2) text/csv (body crudo)
-        content_type = request.headers.get("content-type", "")
-        if "text/csv" in content_type or "application/octet-stream" in content_type:
-            raw = await request.body()
-            if not raw:
-                raise HTTPException(status_code=400, detail="Body vacío")
-            # soporta posibles BOM y grandes archivos con iterdecode
-            stream = io.StringIO(codecs.decode(raw, "utf-8-sig"))
-            reader = _iter_dict_reader(stream)
-            _validate_headers(reader)
-            inserted, errors = _process_rows(reader, session)
-            return {
-                "total": inserted + len(errors),
-                "insertados": inserted,
-                "errores": errors
-            }
-
         raise HTTPException(
             status_code=415,
             detail="Contenido no soportado. Usa multipart/form-data con campo 'file' o text/csv en el body."
@@ -209,94 +191,3 @@ def productos_todos(
 
 
 
-REQUIRED_HEADERS = {"sku", "nombre", "categoria", "temp_min", "temp_max", "controlado"}
-
-def _to_bool(v: str) -> bool:
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    return s in {"true", "1", "si", "sí", "y", "yes", "t"}
-
-def _to_float(v: str) -> float:
-    if v is None or str(v).strip() == "":
-        return None  # permite nulos si tu modelo lo soporta; si no, lanza
-    # admite coma decimal
-    s = str(v).strip().replace(",", ".")
-    return float(s)
-
-def _validate_headers(reader: csv.DictReader):
-    headers = {h.strip().lower() for h in (reader.fieldnames or [])}
-    missing = REQUIRED_HEADERS - headers
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Faltan columnas en el CSV: {', '.join(sorted(missing))}. "
-                   f"Cabeceras requeridas: {', '.join(sorted(REQUIRED_HEADERS))}"
-        )
-
-def _iter_dict_reader(stream: io.TextIOBase) -> csv.DictReader:
-    # Detecta delimitador ; o , automáticamente
-    sample = stream.read(4096)
-    stream.seek(0)
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;")
-    except csv.Error:
-        dialect = csv.excel
-    reader = csv.DictReader(stream, dialect=dialect)
-    # normaliza encabezados (lower + strip)
-    if reader.fieldnames:
-        reader.fieldnames = [h.strip().lower() for h in reader.fieldnames]
-    return reader
-
-def _row_to_payload(row: Dict[str, Any]) -> ProductoCreate:
-    try:
-        return ProductoCreate(
-            sku=str(row.get("sku", "")).strip(),
-            nombre=str(row.get("nombre", "")).strip(),
-            categoria=str(row.get("categoria", "")).strip(),
-            temp_min=_to_float(row.get("temp_min")),
-            temp_max=_to_float(row.get("temp_max")),
-            controlado=_to_bool(row.get("controlado")),
-        )
-    except Exception as e:
-        # Cualquier error de casteo se eleva y será capturado arriba
-        raise ValueError(f"Error convirtiendo tipos: {e}")
-
-def _process_rows(reader: csv.DictReader, session: Session):
-    inserted = 0
-    errors: List[Dict[str, Any]] = []
-
-    # línea lógica de datos inicia en 2 (1 = cabecera)
-    for idx, row in enumerate(reader, start=2):
-        try:
-            payload = _row_to_payload(row)
-            if not payload.sku or not payload.nombre or not payload.categoria:
-                raise ValueError("sku, nombre y categoria son obligatorios")
-
-            svc.crear_producto(
-                session,
-                sku=payload.sku,
-                nombre=payload.nombre,
-                categoria=payload.categoria,
-                temp_min=payload.temp_min,
-                temp_max=payload.temp_max,
-                controlado=payload.controlado,
-            )
-
-            inserted += 1
-
-        except ValueError as e:
-            errors.append({
-                "linea": idx,
-                "sku": (row.get("sku") or "").strip(),
-                "error": str(e)
-            })
-        except Exception as e:
-            # errores inesperados
-            errors.append({
-                "linea": idx,
-                "sku": (row.get("sku") or "").strip(),
-                "error": f"Excepción inesperada: {e}"
-            })
-
-    return inserted, errors
