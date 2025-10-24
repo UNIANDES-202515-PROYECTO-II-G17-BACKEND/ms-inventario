@@ -6,7 +6,7 @@ from .config import settings
 import logging, sys
 
 from .domain import models
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from src.infrastructure.infrastructure import engine
 from .routes.health import router as health_router
 from .routes.inventario import router as inventario_router
@@ -26,6 +26,8 @@ async def lifespan(app):
     for schema in KNOWN_SCHEMAS:
         try:
             eng = engine.execution_options(schema_translate_map={None: schema})
+            with engine.begin() as conn:
+                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
             models.Base.metadata.create_all(bind=eng)
             inspector = inspect(eng)
             tables = inspector.get_table_names(schema=schema)
