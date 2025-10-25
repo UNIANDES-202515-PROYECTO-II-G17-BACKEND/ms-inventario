@@ -137,3 +137,5 @@ def test_ubicaciones_con_stock_por_producto(session, setup_completo):
     p1, *_ = setup_completo
     ubicaciones = svc.ubicaciones_con_stock_por_producto(session, p1.id)
     assert len(ubicaciones) == 2
+
+

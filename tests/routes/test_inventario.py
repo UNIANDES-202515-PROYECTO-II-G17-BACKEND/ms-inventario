@@ -1,11 +1,11 @@
-
+import json
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from uuid import uuid4
 from datetime import date
+from uuid import uuid4
 
 from src.app import app
 from src.domain.models import Base, CertificacionTipoEnum, PaisEnum, InventarioEstadoEnum
@@ -97,3 +97,206 @@ def test_producto_detalle_con_cache(mock_svc_call, apply_mocks):
     mock_svc_call.assert_not_called() # No se debe llamar a la DB
     apply_mocks.get.assert_called_once_with(f"co-{producto_id}") # Se leyó de Redis
     apply_mocks.set.assert_not_called() # No se escribió en Redis
+
+def _mk_csv(lines):
+    return ("\n".join(lines)).encode("utf-8")
+
+
+@patch("src.services.inventario_service.MsClient")
+def test_upload_csv_ok(MockMsClient, client):
+    mock_client = MagicMock()
+    mock_client.post.return_value = MagicMock()
+    MockMsClient.return_value = mock_client
+
+    proveedor_id = str(uuid4())
+    csv_bytes = _mk_csv([
+        "sku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo",
+        "SKU-1,Prod 1,Cat,1.5,10.2,true,100,COP,7,10,true",
+        "SKU-2,Prod 2,Cat,0,25,false,200,COP,3,5,false",
+    ])
+    files = {"file": ("productos.csv", csv_bytes, "text/csv")}
+    headers = {"X-Country": "co", "proveedor_id": proveedor_id}
+
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # Forma y conservación de conteo: total == insertados + len(errores)
+    assert set(data.keys()) == {"total", "insertados", "errores"}
+    assert isinstance(data["errores"], list)
+    assert data["total"] == data["insertados"] + len(data["errores"])
+    assert data["total"] == 2
+
+    # Si hubo asociaciones, valida endpoint y serialización
+    if mock_client.post.call_count:
+        for args, kwargs in mock_client.post.call_args_list:
+            assert f"/v1/proveedores/{proveedor_id}/productos" in args[0]
+            json.dumps(kwargs.get("json", {}))
+
+
+@patch("src.services.inventario_service.MsClient")
+def test_upload_csv_ok_con_semicolon(MockMsClient, client):
+    mock_client = MagicMock()
+    mock_client.post.return_value = MagicMock()
+    MockMsClient.return_value = mock_client
+
+    proveedor_id = str(uuid4())
+    csv_bytes = _mk_csv([
+        "sku;nombre;categoria;temp_min;temp_max;controlado;precio;moneda;lead_time_dias;lote_minimo;activo",
+        "SKU-10;Prod 10;Cat;2,5;8,75;SI;150;EUR;4;20;NO",
+    ])
+    files = {"file": ("productos.csv", csv_bytes, "text/csv")}
+    headers = {"X-Country": "mx", "proveedor_id": proveedor_id}
+
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert set(data.keys()) == {"total", "insertados", "errores"}
+    assert data["total"] == data["insertados"] + len(data["errores"])
+    assert data["total"] == 1
+
+    if mock_client.post.call_count:
+        (args, kwargs) = mock_client.post.call_args
+        assert f"/v1/proveedores/{proveedor_id}/productos" in args[0]
+        json.dumps(kwargs.get("json", {}))
+
+
+@patch("src.services.inventario_service.MsClient")
+def test_upload_csv_ok_con_BOM(MockMsClient, client):
+    mock_client = MagicMock()
+    mock_client.post.return_value = MagicMock()
+    MockMsClient.return_value = mock_client
+
+    proveedor_id = str(uuid4())
+    content = "\ufeffsku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo\n" \
+              "SKU-20,Producto BOM,Cat,3,7,1,99.9,USD,2,1,0\n"
+    files = {"file": ("productos.csv", content.encode("utf-8"), "text/csv")}
+    headers = {"X-Country": "pe", "proveedor_id": proveedor_id}
+
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert set(data.keys()) == {"total", "insertados", "errores"}
+    assert data["total"] == data["insertados"] + len(data["errores"])
+    assert data["total"] == 1
+
+    if mock_client.post.call_count:
+        (args, kwargs) = mock_client.post.call_args
+        assert f"/v1/proveedores/{proveedor_id}/productos" in args[0]
+        json.dumps(kwargs.get("json", {}))
+
+
+@patch("src.services.inventario_service.MsClient")
+def test_upload_csv_fila_con_tipos_invalidos(MockMsClient, client):
+    mock_client = MagicMock()
+    mock_client.post.return_value = MagicMock()
+    MockMsClient.return_value = mock_client
+
+    proveedor_id = str(uuid4())
+    csv_bytes = _mk_csv([
+        "sku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo",
+        "SKU-ERR,Prod 4,Cat,NO_NUM,10,true,100,USD,2,5,true",  # temp_min inválido
+        "SKU-OK,Prod 5,Cat,1,2,false,50,USD,1,1,true",
+    ])
+    files = {"file": ("productos.csv", csv_bytes, "text/csv")}
+    headers = {"X-Country": "co", "proveedor_id": proveedor_id}
+
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert set(data.keys()) == {"total", "insertados", "errores"}
+    assert data["total"] == data["insertados"] + len(data["errores"])
+    assert data["total"] == 2
+    # Debe haber al menos 1 error por la fila inválida
+    assert len(data["errores"]) >= 1
+
+
+@patch("src.services.inventario_service.MsClient")
+def test_upload_csv_fila_con_campos_obligatorios_vacios(MockMsClient, client):
+    mock_client = MagicMock()
+    mock_client.post.return_value = MagicMock()
+    MockMsClient.return_value = mock_client
+
+    proveedor_id = str(uuid4())
+    csv_bytes = _mk_csv([
+        "sku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo",
+        ",,,1,2,true,100,USD,2,5,true",  # vacíos sku/nombre/categoria
+        "SKU-7,Prod 7,Cat,1,2,true,100,USD,2,5,true",
+    ])
+    files = {"file": ("productos.csv", csv_bytes, "text/csv")}
+    headers = {"X-Country": "co", "proveedor_id": proveedor_id}
+
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert set(data.keys()) == {"total", "insertados", "errores"}
+    assert data["total"] == data["insertados"] + len(data["errores"])
+    assert data["total"] == 2
+    assert len(data["errores"]) >= 1
+
+# ---------- upload-csv: extensión inválida (400) ----------
+def test_upload_csv_extension_invalida(client):
+    proveedor_id = str(uuid4())
+    files = {"file": ("productos.txt", b"cualquier cosa", "text/plain")}
+    headers = {"X-Country": "co", "proveedor_id": proveedor_id}
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 400
+    assert "El archivo debe ser .csv" in resp.text  # inventario.py valida extensión .csv  :contentReference[oaicite:3]{index=3}
+
+
+# ---------- upload-csv: proveedor_id inválido (400) ----------
+def test_upload_csv_proveedor_id_invalido_400(client):
+    files = {"file": ("productos.csv", b"sku,nombre\nS1,Prod\n", "text/csv")}
+    headers = {"X-Country": "co", "proveedor_id": "no-es-uuid"}
+    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+    assert resp.status_code == 400
+    assert "UUID válido" in resp.text  # conversión UUID en router  :contentReference[oaicite:4]{index=4}
+
+
+# ---------- producto_detalle: cache con JSON inválido -> ignora cache y va a DB ----------
+@patch("src.routes.inventario.svc.producto_detalle")
+def test_producto_detalle_cache_invalido(mock_svc_call, client):
+    producto_id = str(uuid4())
+    # Respuesta del servicio (DB) válida
+    mock_svc_call.return_value = {
+        "id": producto_id, "sku": "SKU-X", "nombre": "X", "categoria": "A",
+        "controlado": False, "stock_total": 0, "certificaciones": [], "lotes": []
+    }
+
+    with patch("src.routes.inventario.get_redis") as mock_get_redis:
+        r = MagicMock()
+        # Cache corrupto: bytes que NO son JSON válido del Pydantic
+        r.get.return_value = b"{not-json"
+        mock_get_redis.return_value = r
+
+        resp = client.get(f"/v1/inventario/producto/{producto_id}/detalle")
+        assert resp.status_code == 200
+        # Al ser inválido, debe llamar a DB
+        mock_svc_call.assert_called_once()
+        # Y debe intentar setear nuevamente
+        assert r.set.call_count == 1  # write-back del buen valor  :contentReference[oaicite:5]{index=5}
+
+
+# ---------- producto_detalle: fallo al escribir en cache -> no rompe (warning) ----------
+@patch("src.routes.inventario.svc.producto_detalle")
+def test_producto_detalle_cache_set_falla_no_rompe(mock_svc_call, client, caplog):
+    producto_id = str(uuid4())
+    mock_svc_call.return_value = {
+        "id": producto_id, "sku": "SKU-Y", "nombre": "Y", "categoria": "B",
+        "controlado": False, "stock_total": 0, "certificaciones": [], "lotes": []
+    }
+
+    with patch("src.routes.inventario.get_redis") as mock_get_redis:
+        r = MagicMock()
+        r.get.return_value = None  # miss
+        r.set.side_effect = RuntimeError("Falla Redis")
+        mock_get_redis.return_value = r
+
+        resp = client.get(f"/v1/inventario/producto/{producto_id}/detalle")
+        assert resp.status_code == 200
+        # Se registró un warning pero no se cae el endpoint  :contentReference[oaicite:6]{index=6}
+        assert any("No se pudo escribir en Redis" in rec.message for rec in caplog.records)

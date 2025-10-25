@@ -43,31 +43,38 @@ def crear_producto(payload: ProductoCreate, session: Session = Depends(get_sessi
 # ---------- CARGA MASIVA POR CSV ----------
 @router.post("/productos/upload-csv")
 async def upload_csv_productos(
-            request: Request,
-            session: Session = Depends(get_session),
-            file: Optional[UploadFile] = File(default=None, description="Archivo CSV con productos"),
-    ):
-        # 1) multipart/form-data (UploadFile)
-        if file is not None:
-                if not file.filename.lower().endswith(".csv"):
-                    raise HTTPException(status_code=400, detail="El archivo debe ser .csv")
-                try:
-                    # decodificación por streaming, soporta UTF-8 con BOM
-                    text_stream = io.TextIOWrapper(file.file, encoding="utf-8-sig", newline="")
-                    reader = svc._iter_dict_reader(text_stream)
-                    svc._validate_headers(reader)
-                    inserted, errors = svc._process_rows(reader, session, UUID(request.headers.get("proveedor_id")), request.headers.get("X-Country"))
-                finally:
-                    await file.close()
-                return {
-                    "total": inserted + len(errors),
-                    "insertados": inserted,
-                    "errores": errors
-                }
-        raise HTTPException(
-            status_code=415,
-            detail="Contenido no soportado. Usa multipart/form-data con campo 'file' o text/csv en el body."
+    request: Request,
+    session: Session = Depends(get_session),
+    file: UploadFile | None = File(default=None, description="Archivo CSV con productos"),
+    x_country: str = Header(..., alias="X-Country"),
+    proveedor_id: str = Header(..., alias="proveedor_id"),
+):
+    if file is None:
+        raise HTTPException(status_code=415, detail="Contenido no soportado: falta multipart/form-data con 'file'")
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser .csv")
+
+    try:
+        proveedor_uuid = UUID(proveedor_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="proveedor_id debe ser un UUID válido")
+
+    csv_bytes = await file.read()
+
+    try:
+        result = svc.procesar_csv_productos(
+            session=session,
+            country=x_country.lower(),
+            proveedor_id=proveedor_uuid,
+            csv_bytes=csv_bytes,
         )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        # No filtramos errores internos
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/producto/{producto_id}/certificacion", response_model=CertificacionOut)
 def agregar_certificacion(producto_id: str, payload: CertificacionCreate, session: Session = Depends(get_session)):
