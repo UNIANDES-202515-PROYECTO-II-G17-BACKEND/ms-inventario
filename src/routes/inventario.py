@@ -1,6 +1,6 @@
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, Header
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from uuid import UUID
 import json
@@ -14,6 +14,10 @@ from src.domain.schemas import (
     LoteCreate, LoteOut, EntradaCreate, FEFOOut, InventarioOut, StockDetalladoItem,
     ProductoDetalleOut, UbicacionStockOut
 )
+from typing import List, Dict, Any, Optional
+import csv
+import io
+import codecs
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/inventario", tags=["Inventario"])
@@ -34,6 +38,43 @@ def crear_producto(payload: ProductoCreate, session: Session = Depends(get_sessi
         return p
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+# ---------- CARGA MASIVA POR CSV ----------
+@router.post("/productos/upload-csv")
+async def upload_csv_productos(
+    request: Request,
+    session: Session = Depends(get_session),
+    file: UploadFile | None = File(default=None, description="Archivo CSV con productos"),
+    x_country: str = Header(..., alias="X-Country"),
+    proveedor_id: str = Header(..., alias="proveedor_id"),
+):
+    if file is None:
+        raise HTTPException(status_code=415, detail="Contenido no soportado: falta multipart/form-data con 'file'")
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser .csv")
+
+    try:
+        proveedor_uuid = UUID(proveedor_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="proveedor_id debe ser un UUID válido")
+
+    csv_bytes = await file.read()
+
+    try:
+        result = svc.procesar_csv_productos(
+            session=session,
+            country=x_country.lower(),
+            proveedor_id=proveedor_uuid,
+            csv_bytes=csv_bytes,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        # No filtramos errores internos
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/producto/{producto_id}/certificacion", response_model=CertificacionOut)
 def agregar_certificacion(producto_id: str, payload: CertificacionCreate, session: Session = Depends(get_session)):
@@ -154,3 +195,6 @@ def productos_todos(
     session: Session = Depends(get_session),
 ):
     return svc.list_productos(session, ids=None, limit=limit, offset=offset)
+
+
+

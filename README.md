@@ -30,6 +30,18 @@ En caso contrario solo ejecuta
 ```
 
 Endpoints:
-- GET /health
-- GET /ready
-- 
+- GET  /health
+- GET  /ready
+- POST /v1/inventario/producto
+- POST /v1/inventario/productos/upload-csv
+- POST /v1/inventario/producto/{{producto_id}}/certificacion
+- POST /v1/inventario/bodega
+- POST /v1/inventario/ubicacion
+- POST /v1/inventario/lote
+- POST /v1/inventario/entrada
+- POST /v1/inventario/salida/fefo?producto_id={{producto_id}}&cantidad=10
+- GET  /v1/inventario/stock/{{producto_id}}
+- GET  /v1/inventario/stock/{{producto_id}}/detalle
+- GET  /v1/inventario/producto/{{producto_id}}/detalle
+- GET  /v1/inventario/producto/{{producto_id}}/ubicaciones
+- GET  /v1/inventario/productos/todos?limit=100&offset=0

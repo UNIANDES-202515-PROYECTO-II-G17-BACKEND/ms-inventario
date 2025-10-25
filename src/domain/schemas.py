@@ -18,6 +18,16 @@ class ProductoCreate(BaseModel):
     temp_max: Optional[float] = None
     controlado: bool = False
 
+class AsociacionProveedor(BaseModel):
+    producto_id: UUID
+    sku_proveedor: str
+    precio: float
+    moneda: str
+    lead_time_dias: float
+    lote_minimo: float
+    activo: bool
+
+
 class ProductoOut(OrmModel):
     id: UUID
     sku: str
