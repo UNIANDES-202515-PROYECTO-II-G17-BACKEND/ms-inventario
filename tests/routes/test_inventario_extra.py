@@ -1,6 +1,14 @@
-import json
-from uuid import uuid4
 from unittest.mock import patch, MagicMock
+
+from uuid import uuid4
+import pytest
+from src.services import inventario_service as svc
+from src.domain.models import Inventario
+from src.domain.models import InventarioEstadoEnum
+
+from src.services.inventario_service import _to_bool, _to_float, _to_int
+from src.services.inventario_service import _row_to_payload, _row_to_asociacion
+
 
 # ---------- util ----------
 def _mk_csv(lines):
@@ -98,3 +106,121 @@ def test_productos_todos_paginacion(client):
     r2 = client.get("/v1/inventario/productos/todos?limit=2&offset=2")
     assert r2.status_code == 200
     assert 0 <= len(r2.json()) <= 2
+
+
+def test_producto_detalle_producto_inexistente(session):
+    """
+    Cubre:
+        prod = session.get(Producto, producto_id)
+        if not prod: raise ValueError("Producto no encontrado")
+    """
+    with pytest.raises(ValueError, match="Producto no encontrado"):
+        svc.producto_detalle(session, uuid4())
+
+
+def test_crear_o_recuperar_producto_reutiliza_existente(session):
+    core = {
+        "sku": "SKU-EXISTE",
+        "nombre": "Producto X",
+        "categoria": "CAT",
+        "temp_min": 0,
+        "temp_max": 10,
+        "controlado": False,
+    }
+    p1 = svc.crear_producto(
+        session,
+        sku=core["sku"],
+        nombre=core["nombre"],
+        categoria=core["categoria"],
+        temp_min=core["temp_min"],
+        temp_max=core["temp_max"],
+        controlado=core["controlado"],
+    )
+
+    p2 = svc.crear_o_recuperar_producto(session, core)
+    assert p2.id == p1.id  # misma fila → rama 'existente' cubierta
+
+
+def test_to_bool_varios_casos():
+    assert _to_bool(None) is None            # rama val is None
+    assert _to_bool("Sí") is True            # en _TRUE
+    assert _to_bool("no") is False           # en _FALSE
+    assert _to_bool("1") is True             # dígito → bool(int)
+    assert _to_bool("0") is False
+
+    with pytest.raises(ValueError, match="Valor booleano inválido"):
+        _to_bool("quizas")                   # rama de error
+
+
+def test_to_float_y_to_int():
+    assert _to_float(None) is None
+    assert _to_float("") is None
+    assert _to_float("1,5") == 1.5           # reemplaza coma
+
+    assert _to_int(None) is None
+    assert _to_int("") is None
+    assert _to_int(" 42 ") == 42
+
+def test_row_to_payload_ok_y_obligatorios(session):
+    row = {
+        "sku": " SKU-1 ",
+        "nombre": " Prod 1 ",
+        "categoria": " Cat ",
+        "temp_min": "1,5",
+        "temp_max": "10",
+        "controlado": "true",
+        "precio": "100",
+        "moneda": " COP ",
+        "lead_time_dias": " 7 ",
+        "lote_minimo": " 10 ",
+        "activo": "1",
+    }
+    payload = _row_to_payload(row)
+    assert payload["sku"] == "SKU-1"
+    assert payload["nombre"] == "Prod 1"
+    assert payload["categoria"] == "Cat"
+    assert payload["temp_min"] == 1.5
+    assert payload["lead_time_dias"] == 7
+    assert payload["activo"] is True
+
+    # ahora forzamos los campos obligatorios vacíos
+    row_bad = {
+        "sku": "",
+        "nombre": "  ",
+        "categoria": "",
+    }
+    with pytest.raises(ValueError, match="Campos obligatorios vacíos"):
+        _row_to_payload(row_bad)
+
+
+def test_row_to_asociacion_campos_requeridos_y_activo_por_defecto():
+    producto_id = uuid4()
+    row = {
+        "sku": " COD-1 ",
+        "precio": " 10,0 ",
+        "moneda": " COP ",
+        "lead_time_dias": " 5 ",
+        "lote_minimo": " 1 ",
+        # OJO: NO hay clave "activo" → row.get("activo") -> None → _to_bool(None) -> None → default False
+    }
+
+    assoc = _row_to_asociacion(row, producto_id)
+
+    assert assoc.producto_id == producto_id
+    assert assoc.sku_proveedor == "COD-1"
+    assert assoc.precio == 10.0
+    assert assoc.moneda == "COP"
+    assert assoc.lead_time_dias == 5
+    assert assoc.lote_minimo == 1
+    assert assoc.activo is False
+
+    # Caso error por campo requerido vacío
+    row_bad = {
+        "sku": "   ",            # vacío después de strip
+        "precio": "10",
+        "moneda": "COP",
+        "lead_time_dias": "1",
+        "lote_minimo": "1",
+    }
+    with pytest.raises(ValueError, match="Campo requerido vacío en asociación: sku"):
+        _row_to_asociacion(row_bad, producto_id)

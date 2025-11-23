@@ -25,4 +25,10 @@ class Settings:
     COUNTRY_HEADER = os.getenv("COUNTRY_HEADER", "X-Country")
     GATEWAY_BASE_URL = os.getenv("GATEWAY_BASE_URL", "https://medisupply-gw-5k2l9pfv.uc.gateway.dev")
 
+    TOPIC_PEDIDOS = os.getenv("TOPIC_PEDIDOS")
+    TOPIC_INVENTARIO = os.getenv("TOPIC_INVENTARIO")
+    TOPIC_LOGISTICA = os.getenv("TOPIC_LOGISTICA")
+    TOPIC_VENTAS_CRM = os.getenv("TOPIC_VENTAS_CRM")
+    TOPIC_TELEMETRIA = os.getenv("TOPIC_TELEMETRIA")
+
 settings = Settings()

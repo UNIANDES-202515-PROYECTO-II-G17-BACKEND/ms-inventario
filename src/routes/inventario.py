@@ -1,12 +1,13 @@
 import logging
-from typing import Optional, List
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from uuid import UUID
-import json
 from src.dependencies import get_session
 from src.services import inventario_service as svc
 from src.config import settings
+from src.infrastructure.infrastructure import publish_event
 from src.infrastructure.infrastructure import get_redis
 from src.domain.schemas import (
     ProductoCreate, ProductoOut, CertificacionCreate, CertificacionOut,
@@ -14,10 +15,9 @@ from src.domain.schemas import (
     LoteCreate, LoteOut, EntradaCreate, FEFOOut, InventarioOut, StockDetalladoItem,
     ProductoDetalleOut, UbicacionStockOut
 )
-from typing import List, Dict, Any, Optional
-import csv
-import io
-import codecs
+from typing import List, Optional
+import base64
+
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/inventario", tags=["Inventario"])
@@ -44,36 +44,74 @@ def crear_producto(payload: ProductoCreate, session: Session = Depends(get_sessi
 @router.post("/productos/upload-csv")
 async def upload_csv_productos(
     request: Request,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session),   # aunque no lo uses ahora, no estorba
     file: UploadFile | None = File(default=None, description="Archivo CSV con productos"),
     x_country: str = Header(..., alias="X-Country"),
     proveedor_id: str = Header(..., alias="proveedor_id"),
 ):
+    # -------- trace_id ----------
+    trace_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    log_prefix = f"[UPLOAD_CSV][{trace_id}]"
+
     if file is None:
-        raise HTTPException(status_code=415, detail="Contenido no soportado: falta multipart/form-data con 'file'")
+        log.warning("%s Request sin archivo 'file'", log_prefix)
+        raise HTTPException(
+            status_code=415,
+            detail="Contenido no soportado: falta multipart/form-data con 'file'",
+        )
+
     if not file.filename.lower().endswith(".csv"):
+        log.warning("%s Archivo con extensión inválida: %s", log_prefix, file.filename)
         raise HTTPException(status_code=400, detail="El archivo debe ser .csv")
 
     try:
         proveedor_uuid = UUID(proveedor_id)
     except Exception:
+        log.warning("%s proveedor_id inválido: %s", log_prefix, proveedor_id)
         raise HTTPException(status_code=400, detail="proveedor_id debe ser un UUID válido")
 
     csv_bytes = await file.read()
+    if not csv_bytes:
+        log.warning("%s Archivo CSV vacío", log_prefix)
+        raise HTTPException(status_code=400, detail="El archivo CSV está vacío")
+
+    if not settings.TOPIC_INVENTARIO:
+        log.error("%s TOPIC_INVENTARIO no configurado", log_prefix)
+        raise HTTPException(
+            status_code=500,
+            detail="TOPIC_INVENTARIO no está configurado en el entorno",
+        )
+
+    csv_b64 = base64.b64encode(csv_bytes).decode("utf-8")
+
+    event = {
+        "event": "creacion_masiva_producto",
+        "csv_base64": csv_b64,
+        "proveedor_id": str(proveedor_uuid),
+        "filename": file.filename,
+        "ctx": {
+            "country": x_country.lower().strip(),
+            "trace_id": trace_id,
+        },
+    }
 
     try:
-        result = svc.procesar_csv_productos(
-            session=session,
-            country=x_country.lower(),
-            proveedor_id=proveedor_uuid,
-            csv_bytes=csv_bytes,
+        publish_event(
+            data=event,
+            topic_path=settings.TOPIC_INVENTARIO,
         )
-        return result
-    except HTTPException:
-        raise
+        log.info("%s Evento enviado a Pub/Sub topic=%s", log_prefix, settings.TOPIC_INVENTARIO)
     except Exception as e:
-        # No filtramos errores internos
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("%s Error publicando evento en Pub/Sub", log_prefix)
+        raise HTTPException(status_code=500, detail=f"Error publicando evento en Pub/Sub: {e}")
+
+    # 👈 AQUÍ ES DONDE FALTABA `trace_id`
+    return {
+        "status": "accepted",
+        "message": "Carga masiva encolada para procesamiento asíncrono",
+        "event": "creacion_masiva_producto",
+        "trace_id": trace_id,
+    }
 
 
 @router.post("/producto/{producto_id}/certificacion", response_model=CertificacionOut)

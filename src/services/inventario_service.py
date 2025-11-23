@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Tuple
+from typing import Tuple
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -10,12 +10,10 @@ from src.domain.models import (
 from typing import List, Dict, Any, Optional
 import csv
 import io
-import codecs
 from uuid import UUID
 from fastapi import HTTPException
-from src.domain.schemas import (ProductoCreate, AsociacionProveedor)
+from src.domain.schemas import (AsociacionProveedor)
 import logging
-from src.config import settings
 from src.infrastructure.http import MsClient
 
 log = logging.getLogger(__name__)
@@ -431,15 +429,28 @@ def procesar_csv_productos(
     country: str,
     proveedor_id: UUID,
     csv_bytes: bytes,
+    trace_id: str | None = None,
 ) -> Dict[str, Any]:
+    log_prefix = f"[CSV_PROC][{trace_id}]" if trace_id else "[CSV_PROC]"
+
+    log.info(
+        "%s Inicio procesar_csv_productos: proveedor_id=%s country=%s tamaño=%d bytes",
+        log_prefix,
+        proveedor_id,
+        country,
+        len(csv_bytes),
+    )
+
     reader, stream = _sniff_and_build_reader(csv_bytes)
 
     if reader.fieldnames is None:
+        log.warning("%s CSV sin cabeceras", log_prefix)
         raise HTTPException(status_code=400, detail="No se detectaron cabeceras en el CSV")
 
     headers = [h.strip() for h in reader.fieldnames if h]
     missing = _validate_headers(headers)
     if missing:
+        log.warning("%s Faltan columnas en el CSV: %s", log_prefix, ", ".join(missing))
         raise HTTPException(status_code=400, detail=f"Faltan columnas en el CSV: {', '.join(missing)}")
 
     client = MsClient(country)
@@ -459,6 +470,21 @@ def procesar_csv_productos(
             )
             insertados += 1
         except Exception as e:
+            log.warning(
+                "%s Error en línea %d: %s (row=%s)",
+                log_prefix,
+                idx,
+                e,
+                row,
+            )
             errores.append({"linea": idx, "error": str(e)})
+
+    log.info(
+        "%s Fin procesar_csv_productos: total=%d insertados=%d errores=%d",
+        log_prefix,
+        total,
+        insertados,
+        len(errores),
+    )
 
     return {"total": total, "insertados": insertados, "errores": errores}
