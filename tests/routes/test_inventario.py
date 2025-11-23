@@ -1,4 +1,3 @@
-import json
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -6,8 +5,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from datetime import date
 from uuid import uuid4
+import base64
 
 from src.app import app
+from src.config import settings
 from src.domain.models import Base, CertificacionTipoEnum, PaisEnum, InventarioEstadoEnum
 from src.dependencies import get_session
 
@@ -24,6 +25,9 @@ def override_get_session():
     finally:
         db.close()
 app.dependency_overrides[get_session] = override_get_session
+
+def _mk_csv(lines):
+    return ("\n".join(lines)).encode("utf-8")
 
 @pytest.fixture(scope="function", autouse=True)
 def apply_mocks():
@@ -102,11 +106,10 @@ def _mk_csv(lines):
     return ("\n".join(lines)).encode("utf-8")
 
 
-@patch("src.services.inventario_service.MsClient")
-def test_upload_csv_ok(MockMsClient, client):
-    mock_client = MagicMock()
-    mock_client.post.return_value = MagicMock()
-    MockMsClient.return_value = mock_client
+@patch("src.routes.inventario.publish_event")
+def test_upload_csv_async_publica_evento_ok(mock_publish_event, client):
+    # 👇 Configurar TOPIC_INVENTARIO para el entorno de test
+    settings.TOPIC_INVENTARIO = "projects/test/topics/test-inventario"
 
     proveedor_id = str(uuid4())
     csv_bytes = _mk_csv([
@@ -118,125 +121,43 @@ def test_upload_csv_ok(MockMsClient, client):
     headers = {"X-Country": "co", "proveedor_id": proveedor_id}
 
     resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
+
     assert resp.status_code == 200, resp.text
-    data = resp.json()
+    body = resp.json()
+    assert body["status"] == "accepted"
+    assert body["event"] == "creacion_masiva_producto"
+    assert "trace_id" in body
 
-    # Forma y conservación de conteo: total == insertados + len(errores)
-    assert set(data.keys()) == {"total", "insertados", "errores"}
-    assert isinstance(data["errores"], list)
-    assert data["total"] == data["insertados"] + len(data["errores"])
-    assert data["total"] == 2
+    mock_publish_event.assert_called_once()
+    kwargs = mock_publish_event.call_args.kwargs
+    event = kwargs["data"]
 
-    # Si hubo asociaciones, valida endpoint y serialización
-    if mock_client.post.call_count:
-        for args, kwargs in mock_client.post.call_args_list:
-            assert f"/v1/proveedores/{proveedor_id}/productos" in args[0]
-            json.dumps(kwargs.get("json", {}))
+    assert event["event"] == "creacion_masiva_producto"
+    assert event["proveedor_id"] == proveedor_id
+    assert event["ctx"]["country"] == "co"
 
-
-@patch("src.services.inventario_service.MsClient")
-def test_upload_csv_ok_con_semicolon(MockMsClient, client):
-    mock_client = MagicMock()
-    mock_client.post.return_value = MagicMock()
-    MockMsClient.return_value = mock_client
-
-    proveedor_id = str(uuid4())
-    csv_bytes = _mk_csv([
-        "sku;nombre;categoria;temp_min;temp_max;controlado;precio;moneda;lead_time_dias;lote_minimo;activo",
-        "SKU-10;Prod 10;Cat;2,5;8,75;SI;150;EUR;4;20;NO",
-    ])
-    files = {"file": ("productos.csv", csv_bytes, "text/csv")}
-    headers = {"X-Country": "mx", "proveedor_id": proveedor_id}
-
-    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-
-    assert set(data.keys()) == {"total", "insertados", "errores"}
-    assert data["total"] == data["insertados"] + len(data["errores"])
-    assert data["total"] == 1
-
-    if mock_client.post.call_count:
-        (args, kwargs) = mock_client.post.call_args
-        assert f"/v1/proveedores/{proveedor_id}/productos" in args[0]
-        json.dumps(kwargs.get("json", {}))
+    decoded_csv = base64.b64decode(event["csv_base64"]).decode("utf-8").strip()
+    assert "SKU-1" in decoded_csv
+    assert "SKU-2" in decoded_csv
 
 
-@patch("src.services.inventario_service.MsClient")
-def test_upload_csv_ok_con_BOM(MockMsClient, client):
-    mock_client = MagicMock()
-    mock_client.post.return_value = MagicMock()
-    MockMsClient.return_value = mock_client
-
-    proveedor_id = str(uuid4())
-    content = "\ufeffsku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo\n" \
-              "SKU-20,Producto BOM,Cat,3,7,1,99.9,USD,2,1,0\n"
-    files = {"file": ("productos.csv", content.encode("utf-8"), "text/csv")}
-    headers = {"X-Country": "pe", "proveedor_id": proveedor_id}
-
-    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-
-    assert set(data.keys()) == {"total", "insertados", "errores"}
-    assert data["total"] == data["insertados"] + len(data["errores"])
-    assert data["total"] == 1
-
-    if mock_client.post.call_count:
-        (args, kwargs) = mock_client.post.call_args
-        assert f"/v1/proveedores/{proveedor_id}/productos" in args[0]
-        json.dumps(kwargs.get("json", {}))
-
-
-@patch("src.services.inventario_service.MsClient")
-def test_upload_csv_fila_con_tipos_invalidos(MockMsClient, client):
-    mock_client = MagicMock()
-    mock_client.post.return_value = MagicMock()
-    MockMsClient.return_value = mock_client
+@patch("src.routes.inventario.publish_event", side_effect=RuntimeError("Falla PubSub"))
+def test_upload_csv_error_al_publicar_pubsub_retorna_500(mock_publish_event, client):
+    # 👇 También aquí: si no se setea, nunca entra al branch de publish_event
+    settings.TOPIC_INVENTARIO = "projects/test/topics/test-inventario"
 
     proveedor_id = str(uuid4())
     csv_bytes = _mk_csv([
         "sku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo",
-        "SKU-ERR,Prod 4,Cat,NO_NUM,10,true,100,USD,2,5,true",  # temp_min inválido
-        "SKU-OK,Prod 5,Cat,1,2,false,50,USD,1,1,true",
+        "SKU-ERR,Prod,Cat,1,2,true,100,COP,1,1,true",
     ])
     files = {"file": ("productos.csv", csv_bytes, "text/csv")}
     headers = {"X-Country": "co", "proveedor_id": proveedor_id}
 
     resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
 
-    assert set(data.keys()) == {"total", "insertados", "errores"}
-    assert data["total"] == data["insertados"] + len(data["errores"])
-    assert data["total"] == 2
-    # Debe haber al menos 1 error por la fila inválida
-    assert len(data["errores"]) >= 1
-
-
-@patch("src.services.inventario_service.MsClient")
-def test_upload_csv_fila_con_campos_obligatorios_vacios(MockMsClient, client):
-    mock_client = MagicMock()
-    mock_client.post.return_value = MagicMock()
-    MockMsClient.return_value = mock_client
-
-    proveedor_id = str(uuid4())
-    csv_bytes = _mk_csv([
-        "sku,nombre,categoria,temp_min,temp_max,controlado,precio,moneda,lead_time_dias,lote_minimo,activo",
-        ",,,1,2,true,100,USD,2,5,true",  # vacíos sku/nombre/categoria
-        "SKU-7,Prod 7,Cat,1,2,true,100,USD,2,5,true",
-    ])
-    files = {"file": ("productos.csv", csv_bytes, "text/csv")}
-    headers = {"X-Country": "co", "proveedor_id": proveedor_id}
-
-    resp = client.post("/v1/inventario/productos/upload-csv", files=files, headers=headers)
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-
-    assert set(data.keys()) == {"total", "insertados", "errores"}
-    assert data["total"] == data["insertados"] + len(data["errores"])
-    assert data["total"] == 2
-    assert len(data["errores"]) >= 1
+    assert resp.status_code == 500
+    assert "Error publicando evento en Pub/Sub" in resp.text
 
 # ---------- upload-csv: extensión inválida (400) ----------
 def test_upload_csv_extension_invalida(client):
